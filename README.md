@@ -13,3 +13,4 @@ The notebook covers environment setup, inference with Qwen3-4B-Thinking (INT8), 
 | `utils.py` | Utilities used by `judger.py` |
 | `data/public.jsonl` | Public dataset with ground-truth answers |
 | `results/` | Output JSONL files written at runtime |
+| `data/private.jsonl` | test dataset |
