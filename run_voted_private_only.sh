@@ -52,12 +52,7 @@ run_voted() {
 cleanup_vllm
 
 # ============ 三个模型分别跑 voted private ============
-echo ""
-echo "============================================================"
-echo "[1/3] base 模型 voted private 推理"
-echo "============================================================"
-run_voted "Qwen/Qwen3-4B-Thinking-2507" \
-          "results/eval_base_private_voted.jsonl"
+
 
 echo ""
 echo "============================================================"
