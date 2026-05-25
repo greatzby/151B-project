@@ -23,11 +23,11 @@ RL_MERGED_DIR   = CKPT_DIR / "rl_merged"
 
 # ── 模型 ──────────────────────────────────────────────────────────
 MODEL_ID      = "Qwen/Qwen3-4B-Thinking-2507"
-MAX_TOKENS    = 16384      # 单次生成最大 token
-MAX_MODEL_LEN = 16384      # vLLM 最大序列长度
+MAX_TOKENS    = 32768       # 恢复！会被 max_model_len 自然约束
+MAX_MODEL_LEN = 16384
 
 # ── 数据划分 ──────────────────────────────────────────────────────
-VAL_RATIO = 0.10           # 10% 验证集
+VAL_RATIO = 0.10
 SEED      = 42
 
 # ── 拒绝采样 ──────────────────────────────────────────────────────
@@ -38,23 +38,27 @@ RS_TOP_P               = 0.95
 # ── SFT ───────────────────────────────────────────────────────────
 SFT_EPOCHS       = 2
 SFT_BATCH_SIZE   = 1
-SFT_GRAD_ACCUM   = 8       # 等效 batch_size = 8
+SFT_GRAD_ACCUM   = 8
 SFT_LR           = 1e-4
 SFT_MAX_SEQ_LEN  = 8192
 LORA_R           = 16
 LORA_ALPHA       = 32
 
 # ── RL (GRPO) ─────────────────────────────────────────────────────
-RL_MAX_STEPS         = 200      # 总步数（按时间调整）
+RL_MAX_STEPS         = 200
 RL_BATCH_SIZE        = 2
 RL_GRAD_ACCUM        = 2
 RL_LR                = 5e-6
-RL_NUM_GENERATIONS   = 4        # 每个 prompt 生成几个采样
+RL_NUM_GENERATIONS   = 4
 RL_MAX_PROMPT_LEN    = 1024
 RL_MAX_COMPLETION_LEN = 1024
-RL_BETA              = 0.04     # KL 惩罚系数
+RL_BETA              = 0.04
 
-# ── 评测 ──────────────────────────────────────────────────────────
-EVAL_TEMPERATURE = 0.7
-EVAL_TOP_P       = 0.95
-EVAL_N           = 1            # 单次生成
+# ── 评测（恢复你原来的参数 + 多数投票）─────────────────────────
+EVAL_TEMPERATURE        = 0.7
+EVAL_TOP_P              = 0.95
+EVAL_TOP_K              = 20
+EVAL_MIN_P              = 0.0
+EVAL_PRESENCE_PENALTY   = 0.5
+EVAL_REPETITION_PENALTY = 1.0
+EVAL_N                  = 5      # 多数投票
