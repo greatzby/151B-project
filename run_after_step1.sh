@@ -106,10 +106,10 @@ run_eval "ckpts/sft_merged" \
          "splits/val.jsonl" \
          "results/eval_sft_val.jsonl"
 
-# ============ [5/9] RL 训练（双卡 DDP，不用 vLLM）============
+# ============ [5/9] RL 训练（单卡，不用 vLLM）============
 echo ""
 echo "================================================"
-echo "[5/9] RL (GRPO) 训练 - 双卡 DDP，HF generate（约 2-3h）"
+echo "[5/9] RL (GRPO) 训练 - 单卡 GPU 0，HF generate（约 3-4h）"
 echo "================================================"
 if [ -d "ckpts/rl_merged" ] && [ -n "$(ls -A ckpts/rl_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/rl_merged 已存在"
@@ -117,13 +117,7 @@ else
     cleanup_vllm
 
     set +e
-    CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
-        --multi_gpu \
-        --num_processes 2 \
-        --num_machines 1 \
-        --mixed_precision bf16 \
-        --dynamo_backend no \
-        rl_train.py --no_vllm
+    CUDA_VISIBLE_DEVICES=0 python rl_train.py --no_vllm
     TRAIN_EXIT=$?
     set -e
 
@@ -131,11 +125,16 @@ else
 
     if [ $TRAIN_EXIT -ne 0 ]; then
         echo "❌ rl_train.py 退出码 $TRAIN_EXIT"
-        echo "💡 提示：可降低 RL_BATCH_SIZE 或 RL_MAX_COMPLETION_LEN 后重试"
+        if [ $TRAIN_EXIT -eq 137 ]; then
+            echo "💡 137 = 进程被 SIGKILL（通常是系统 RAM OOM 或 cgroup 限制）"
+            echo "💡 检查命令：dmesg -T | grep -iE 'killed|oom' | tail -10"
+            echo "💡 或者：free -h"
+        else
+            echo "💡 提示：可降低 RL_BATCH_SIZE 或 RL_MAX_COMPLETION_LEN 后重试"
+        fi
         exit $TRAIN_EXIT
     fi
 fi
-
 # ============ [6/9] 评测 RL ============
 echo ""
 echo "================================================"
