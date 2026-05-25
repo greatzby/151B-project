@@ -89,7 +89,7 @@ def main():
         gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to="none",
         lr_scheduler_type="cosine",
-        dataset_text_field=None,
+        # dataset_text_field=None,
     )
 
     # 7. Trainer
