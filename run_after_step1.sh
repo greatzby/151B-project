@@ -3,22 +3,23 @@
 # 假设 prepare_sft_data.py（步骤1）已经跑完
 #
 # 资源分配：
-#   - SFT/评测：单卡（GPU 0）
+#   - SFT 训练：单卡（GPU 0）
+#   - 评测：双卡 TP=2（vLLM, mp backend，不用 Ray）
 #   - RL 训练：双卡 DDP（GPU 0 + GPU 1），不用 vLLM
 
 set -e
 source .venv/bin/activate
 
-# 默认全局只用 GPU 0（适用于 SFT、评测、Kaggle 推理）
-# RL 步骤会用 inline CUDA_VISIBLE_DEVICES=0,1 临时覆盖
+# 默认全局只用 GPU 0（适用于 SFT 训练这种单卡步骤）
+# 评测和 RL 训练会 inline 覆盖为 0,1
 export CUDA_VISIBLE_DEVICES=0
 export LD_LIBRARY_PATH=$(python -c "import os, nvidia.cudnn; print(os.path.dirname(nvidia.cudnn.__file__))")/lib:$LD_LIBRARY_PATH
 
 # 让 PyTorch 显存分配更宽松
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# 如遇 vLLM V1 engine 兼容问题（NotImplementedError）可启用下行：
-# export VLLM_USE_V1=0
+# 让 vLLM 在多卡情况下用 mp 后端（不用 Ray）
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 mkdir -p splits sft_data ckpts results logs
 
@@ -39,6 +40,7 @@ cleanup_vllm() {
 }
 
 # 安全的评测调用：跑完后自动清理；输出文件已存在则跳过
+# 评测用 vLLM TP=2，需要两张卡都可见
 run_eval() {
     local model="$1"
     local data="$2"
@@ -52,7 +54,7 @@ run_eval() {
 
     echo ">>> 评测：model=$model"
     echo ">>> 数据：$data → 输出：$out"
-    python evaluate.py \
+    CUDA_VISIBLE_DEVICES=0,1 python evaluate.py \
         --model "$model" \
         --data  "$data"  \
         --output "$out" \
@@ -84,7 +86,7 @@ run_eval "Qwen/Qwen3-4B-Thinking-2507" \
          "splits/val.jsonl" \
          "results/eval_base_val.jsonl"
 
-# ============ [3/9] SFT 训练 ============
+# ============ [3/9] SFT 训练（单卡）============
 echo ""
 echo "================================================"
 echo "[3/9] SFT 训练 (~2h)"
@@ -92,7 +94,7 @@ echo "================================================"
 if [ -d "ckpts/sft_merged" ] && [ -n "$(ls -A ckpts/sft_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/sft_merged 已存在"
 else
-    python sft_train.py
+    CUDA_VISIBLE_DEVICES=0 python sft_train.py
 fi
 
 # ============ [4/9] 评测 SFT ============
@@ -115,8 +117,6 @@ else
     cleanup_vllm
 
     set +e
-    # 双卡 DDP 启动；不开 vLLM
-    # 注意：PYTORCH_CUDA_ALLOC_CONF 已在脚本顶部 export，会被子进程继承
     CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
         --multi_gpu \
         --num_processes 2 \
