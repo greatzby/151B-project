@@ -49,9 +49,9 @@ RL_MAX_STEPS         = 200      # 总步数（按时间调整）
 RL_BATCH_SIZE        = 2
 RL_GRAD_ACCUM        = 2
 RL_LR                = 5e-6
-RL_NUM_GENERATIONS   = 4        # 每个 prompt 生成几个采样
+RL_NUM_GENERATIONS   = 2        # 每个 prompt 生成几个采样
 RL_MAX_PROMPT_LEN    = 1024
-RL_MAX_COMPLETION_LEN = 1024
+RL_MAX_COMPLETION_LEN = 512
 RL_BETA              = 0.04     # KL 惩罚系数
 
 # ── 评测 ──────────────────────────────────────────────────────────
