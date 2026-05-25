@@ -102,9 +102,8 @@ echo "================================================"
 if [ -d "ckpts/rl_merged" ] && [ -n "$(ls -A ckpts/rl_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/rl_merged 已存在"
 else
-    python rl_train.py
+    CUDA_VISIBLE_DEVICES=0,1 python rl_train.py
 fi
-
 # ============ [6/9] 评测 RL ============
 echo ""
 echo "================================================"
