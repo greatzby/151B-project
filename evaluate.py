@@ -60,6 +60,7 @@ def main():
     llm = LLM(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
+        disable_custom_all_reduce=True,
         gpu_memory_utilization=0.85,
         max_model_len=MAX_MODEL_LEN,
         trust_remote_code=True,
