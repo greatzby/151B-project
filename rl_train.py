@@ -7,6 +7,7 @@ GRPO RL 训练，用 judger 作为 reward function。
 """
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -37,7 +38,6 @@ def reward_correctness(completions, **kwargs):
         gold   = answers[i]   if i < len(answers)  else None
         is_mcq = is_mcqs[i]   if i < len(is_mcqs)  else False
 
-        # 现在 gold 永远是 list[str]（在 main 里统一过了）
         if gold is None or (isinstance(gold, list) and len(gold) == 0):
             rewards.append(0.0)
             continue
@@ -45,7 +45,6 @@ def reward_correctness(completions, **kwargs):
             if is_mcq:
                 m = re.search(r"\\boxed\{([A-Za-z])\}", completion)
                 pred = m.group(1).upper() if m else ""
-                # MCQ 题：gold 是 list，取第一个元素作为正确选项
                 gold_str = gold[0] if isinstance(gold, list) else gold
                 correct = pred == str(gold_str).strip().upper()
             else:
@@ -83,6 +82,22 @@ def main():
                         help="禁用 vLLM 加速（fallback 到 HF 生成，会慢很多）")
     args = parser.parse_args()
 
+    # ── 自动计算合法的 batch size ────────────────────────────────────
+    # GRPO 硬约束: global_batch_size = num_processes * per_device_batch_size
+    # 必须能被 num_generations 整除（因为同一 prompt 的 N 个生成要在一个 batch 里）
+    num_procs = int(os.environ.get("WORLD_SIZE", "1"))
+    per_device_bs = max(RL_BATCH_SIZE, args.num_generations)
+    # 向上调整到能被 num_generations 整除（在 num_procs 已知的情况下）
+    while (per_device_bs * num_procs) % args.num_generations != 0:
+        per_device_bs += 1
+    global_bs = per_device_bs * num_procs
+    unique_prompts_per_step = global_bs // args.num_generations
+    print(f"📐 num_processes        = {num_procs}")
+    print(f"📐 per_device_batch_size = {per_device_bs}")
+    print(f"📐 global_batch_size    = {global_bs}")
+    print(f"📐 num_generations      = {args.num_generations}")
+    print(f"📐 unique_prompts/step  = {unique_prompts_per_step}")
+
     # 1. 加载训练数据
     train_data = load_jsonl(TRAIN_DATA_PATH)
     print(f"已加载 {len(train_data)} 条训练数据")
@@ -103,10 +118,7 @@ def main():
             add_generation_prompt=True,
         )
 
-        # 🔧 统一 answer 为 list[str]，避免 PyArrow 类型混乱：
-        # MCQ 题原本是 "A"，free-form 是 ["xxx", "yyy"]，
-        # PyArrow 不允许同一列既有 str 又有 list，会报
-        # "cannot mix list and non-list, non-null values"
+        # 🔧 统一 answer 为 list[str]，避免 PyArrow 类型混乱
         ans = item["answer"]
         if ans is None:
             ans = []
@@ -117,12 +129,12 @@ def main():
 
         examples.append({
             "prompt": prompt,
-            "answer": ans,                       # 永远是 list[str]
+            "answer": ans,
             "is_mcq": bool(item.get("options")),
         })
     dataset = Dataset.from_list(examples)
 
-    # 4. LoRA（在 SFT merged 模型基础上训练新的 LoRA）
+    # 4. LoRA
     lora_config = LoraConfig(
         r=LORA_R,
         lora_alpha=LORA_ALPHA,
@@ -137,7 +149,7 @@ def main():
     grpo_config = GRPOConfig(
         output_dir=str(RL_CKPT_DIR),
         max_steps=args.max_steps,
-        per_device_train_batch_size=RL_BATCH_SIZE,
+        per_device_train_batch_size=per_device_bs,           # ✅ 自动算出的合法值
         gradient_accumulation_steps=RL_GRAD_ACCUM,
         learning_rate=args.lr,
         bf16=True,
@@ -154,7 +166,7 @@ def main():
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         use_vllm=not args.no_vllm,
-        vllm_device="cuda:1",                # vLLM 用 GPU 1
+        vllm_device="cuda:1",
         vllm_gpu_memory_utilization=0.6,
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
