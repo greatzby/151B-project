@@ -1,12 +1,18 @@
 """
 GRPO RL 训练，用 judger 作为 reward function。
 
-资源分配（单卡）：
-- GPU 0：训练 + vLLM 采样（colocate 模式共享显存）
+资源分配：
+- 单卡模式：GPU 0 同时训练 + 采样（HF generate）
+- 双卡 DDP 模式：GPU 0 + GPU 1 各跑一份模型副本，分别独立 generate
+  启动命令：
+      CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
+          --multi_gpu --num_processes 2 --mixed_precision bf16 \
+          rl_train.py --no_vllm
 
 本脚本对 TRL 版本做了自适应：
 - 新版 TRL（有 vllm_mode）：使用 vllm_mode="colocate"
-- 旧版 TRL（只有 vllm_device）：使用 vllm_device="cuda:0"
+- 旧版 TRL（只有 vllm_device）：使用 vllm_device=args.vllm_device
+- --no_vllm：完全禁用 vLLM，使用 HF generate
 """
 import argparse
 import inspect
@@ -105,6 +111,10 @@ def build_grpo_config(args, per_device_bs):
         gradient_checkpointing_kwargs={"use_reentrant": False},
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
+        # ── DDP 设置：LoRA 只训练 adapter 层，关掉 unused param 检查避免报错/拖慢 ──
+        ddp_find_unused_parameters=False,
+        # 让数据加载在 DDP 下也均匀
+        dataloader_drop_last=True,
     )
 
     # vLLM 配置（按版本自适应）
@@ -113,29 +123,25 @@ def build_grpo_config(args, per_device_bs):
             kwargs["use_vllm"] = True
 
         if "vllm_mode" in valid:
-            # 新版 TRL：colocate 模式，跟训练共享 GPU
             kwargs["vllm_mode"] = "colocate"
             print("✅ 使用 TRL 新版 vLLM API: vllm_mode='colocate'")
         elif "vllm_device" in valid:
-            # 旧版 TRL：把 vLLM 跑在同一张卡（cuda:0）
-            kwargs["vllm_device"] = "cuda:0"
-            print("✅ 使用 TRL 旧版 vLLM API: vllm_device='cuda:0'")
+            kwargs["vllm_device"] = args.vllm_device
+            print(f"✅ 使用 TRL 旧版 vLLM API: vllm_device='{args.vllm_device}'")
         else:
             print("⚠️  TRL 版本不支持显式选择 vLLM 模式，按默认行为运行")
 
         if "vllm_gpu_memory_utilization" in valid:
             kwargs["vllm_gpu_memory_utilization"] = args.vllm_gpu_mem
 
-        # 旧版 TRL 可能还有这些可选项
         if "vllm_dtype" in valid:
             kwargs["vllm_dtype"] = "bfloat16"
         if "vllm_max_model_len" in valid:
-            # prompt + completion 的总长度上限
             kwargs["vllm_max_model_len"] = RL_MAX_PROMPT_LEN + RL_MAX_COMPLETION_LEN
     else:
         if "use_vllm" in valid:
             kwargs["use_vllm"] = False
-        print("⚠️  --no_vllm 已开启，将使用 HuggingFace generate（慢很多）")
+        print("⚠️  --no_vllm 已开启，将使用 HuggingFace generate（慢但稳定）")
 
     # 兜底：把当前 TRL 不认识的 key 全部丢掉，避免 TypeError
     dropped = [k for k in kwargs if k not in valid]
@@ -154,9 +160,11 @@ def main():
     parser.add_argument("--lr", type=float, default=RL_LR)
     parser.add_argument("--num_generations", type=int, default=RL_NUM_GENERATIONS)
     parser.add_argument("--no_vllm", action="store_true",
-                        help="禁用 vLLM 加速（fallback 到 HF 生成，会慢很多）")
+                        help="禁用 vLLM 加速（fallback 到 HF 生成）")
     parser.add_argument("--vllm_gpu_mem", type=float, default=0.30,
-                        help="colocate 模式下 vLLM 占用显存比例 (0~1)")
+                        help="（如果用 vLLM）vLLM 占用显存比例 0~1")
+    parser.add_argument("--vllm_device", type=str, default="cuda:0",
+                        help="（如果用旧版 TRL+vLLM）vLLM 跑哪张卡")
     args = parser.parse_args()
 
     # ── 自动计算合法的 batch size ────────────────────────────────────
@@ -234,17 +242,25 @@ def main():
 
     # 7. 训练
     trainer.train()
-    trainer.save_model(str(RL_CKPT_DIR))
-    tokenizer.save_pretrained(str(RL_CKPT_DIR))
-    print(f"✅ RL LoRA adapter 保存到: {RL_CKPT_DIR}")
 
-    # 8. Merge LoRA → 完整模型
-    print("正在 merge RL LoRA 进 SFT merged 模型...")
-    merged_model = trainer.model.merge_and_unload()
-    RL_MERGED_DIR.mkdir(parents=True, exist_ok=True)
-    merged_model.save_pretrained(str(RL_MERGED_DIR), safe_serialization=True)
-    tokenizer.save_pretrained(str(RL_MERGED_DIR))
-    print(f"✅ 完整 RL 模型保存到: {RL_MERGED_DIR}")
+    # 8. 保存 LoRA adapter（Trainer 内部已处理 main-process-only）
+    trainer.save_model(str(RL_CKPT_DIR))
+    if trainer.accelerator.is_main_process:
+        tokenizer.save_pretrained(str(RL_CKPT_DIR))
+        print(f"✅ RL LoRA adapter 保存到: {RL_CKPT_DIR}")
+
+    # 9. 等所有进程同步，再 merge
+    trainer.accelerator.wait_for_everyone()
+
+    # 10. Merge LoRA → 完整模型（只在主进程）
+    if trainer.accelerator.is_main_process:
+        print("正在 merge RL LoRA 进 SFT merged 模型...")
+        unwrapped = trainer.accelerator.unwrap_model(trainer.model)
+        merged_model = unwrapped.merge_and_unload()
+        RL_MERGED_DIR.mkdir(parents=True, exist_ok=True)
+        merged_model.save_pretrained(str(RL_MERGED_DIR), safe_serialization=True)
+        tokenizer.save_pretrained(str(RL_MERGED_DIR))
+        print(f"✅ 完整 RL 模型保存到: {RL_MERGED_DIR}")
 
 
 if __name__ == "__main__":

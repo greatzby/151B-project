@@ -1,10 +1,16 @@
 #!/bin/bash
 # 从 SFT 训练开始，到生成 3 份 Kaggle 提交结束
 # 假设 prepare_sft_data.py（步骤1）已经跑完
-# 单卡模式：所有训练/推理都在 GPU 0 上
+#
+# 资源分配：
+#   - SFT/评测：单卡（GPU 0）
+#   - RL 训练：双卡 DDP（GPU 0 + GPU 1），不用 vLLM
 
 set -e
 source .venv/bin/activate
+
+# 默认全局只用 GPU 0（适用于 SFT、评测、Kaggle 推理）
+# RL 步骤会用 inline CUDA_VISIBLE_DEVICES=0,1 临时覆盖
 export CUDA_VISIBLE_DEVICES=0
 export LD_LIBRARY_PATH=$(python -c "import os, nvidia.cudnn; print(os.path.dirname(nvidia.cudnn.__file__))")/lib:$LD_LIBRARY_PATH
 
@@ -25,6 +31,7 @@ cleanup_vllm() {
     pkill -9 -f "VllmWorker"   2>/dev/null || true
     pkill -9 -f "EngineCore"   2>/dev/null || true
     pkill -9 -f "multiproc"    2>/dev/null || true
+    pkill -9 -f "rl_train.py"  2>/dev/null || true
     sleep 8
     echo "📊 当前 GPU 状态："
     nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total --format=csv
@@ -63,7 +70,7 @@ for f in splits/train.jsonl splits/val.jsonl sft_data/sft_train.jsonl; do
     fi
 done
 N_SFT=$(wc -l < sft_data/sft_train.jsonl)
-echo "✅ 步骤1产物齐全（$N_SFT 条 SFT 数据），开始训练（单卡模式）"
+echo "✅ 步骤1产物齐全（$N_SFT 条 SFT 数据），开始训练"
 echo ""
 
 # 启动前先清一遍，防止上一轮失败留下的残尸占显存
@@ -97,22 +104,26 @@ run_eval "ckpts/sft_merged" \
          "splits/val.jsonl" \
          "results/eval_sft_val.jsonl"
 
-# ============ [5/9] RL 训练（单卡 colocate）============
+# ============ [5/9] RL 训练（双卡 DDP，不用 vLLM）============
 echo ""
 echo "================================================"
-echo "[5/9] RL (GRPO) 训练 - 单卡 colocate 模式"
+echo "[5/9] RL (GRPO) 训练 - 双卡 DDP，HF generate（约 2-3h）"
 echo "================================================"
 if [ -d "ckpts/rl_merged" ] && [ -n "$(ls -A ckpts/rl_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/rl_merged 已存在"
 else
     cleanup_vllm
 
-    # 训练 + vLLM 都在 GPU 0
-    # vllm_gpu_mem=0.30：vLLM 占 30% 显存，训练占大头
-    # 若 OOM，把 0.30 调小到 0.25 或 0.20；
-    # 若 vLLM 报 NotImplementedError，加 --no_vllm 退化到 HF 生成
     set +e
-    python rl_train.py --vllm_gpu_mem 0.30
+    # 双卡 DDP 启动；不开 vLLM
+    # 注意：PYTORCH_CUDA_ALLOC_CONF 已在脚本顶部 export，会被子进程继承
+    CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
+        --multi_gpu \
+        --num_processes 2 \
+        --num_machines 1 \
+        --mixed_precision bf16 \
+        --dynamo_backend no \
+        rl_train.py --no_vllm
     TRAIN_EXIT=$?
     set -e
 
@@ -120,7 +131,7 @@ else
 
     if [ $TRAIN_EXIT -ne 0 ]; then
         echo "❌ rl_train.py 退出码 $TRAIN_EXIT"
-        echo "💡 提示：如果是 vLLM 报错，可改用 'python rl_train.py --no_vllm'（慢但稳）"
+        echo "💡 提示：可降低 RL_BATCH_SIZE 或 RL_MAX_COMPLETION_LEN 后重试"
         exit $TRAIN_EXIT
     fi
 fi
