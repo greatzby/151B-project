@@ -37,14 +37,17 @@ def reward_correctness(completions, **kwargs):
         gold   = answers[i]   if i < len(answers)  else None
         is_mcq = is_mcqs[i]   if i < len(is_mcqs)  else False
 
-        if gold is None:
+        # 现在 gold 永远是 list[str]（在 main 里统一过了）
+        if gold is None or (isinstance(gold, list) and len(gold) == 0):
             rewards.append(0.0)
             continue
         try:
             if is_mcq:
                 m = re.search(r"\\boxed\{([A-Za-z])\}", completion)
                 pred = m.group(1).upper() if m else ""
-                correct = pred == str(gold).strip().upper()
+                # MCQ 题：gold 是 list，取第一个元素作为正确选项
+                gold_str = gold[0] if isinstance(gold, list) else gold
+                correct = pred == str(gold_str).strip().upper()
             else:
                 gold_list = gold if isinstance(gold, list) else [gold]
                 correct = _judger.auto_judge(
@@ -99,9 +102,22 @@ def main():
             tokenize=False,
             add_generation_prompt=True,
         )
+
+        # 🔧 统一 answer 为 list[str]，避免 PyArrow 类型混乱：
+        # MCQ 题原本是 "A"，free-form 是 ["xxx", "yyy"]，
+        # PyArrow 不允许同一列既有 str 又有 list，会报
+        # "cannot mix list and non-list, non-null values"
+        ans = item["answer"]
+        if ans is None:
+            ans = []
+        elif not isinstance(ans, list):
+            ans = [str(ans)]
+        else:
+            ans = [str(x) for x in ans]
+
         examples.append({
             "prompt": prompt,
-            "answer": item["answer"],
+            "answer": ans,                       # 永远是 list[str]
             "is_mcq": bool(item.get("options")),
         })
     dataset = Dataset.from_list(examples)
