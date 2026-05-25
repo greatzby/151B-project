@@ -166,8 +166,10 @@ def main():
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         use_vllm=not args.no_vllm,
-        vllm_device="cuda:1",
-        vllm_gpu_memory_utilization=0.6,
+        vllm_mode="server",
+        vllm_server_host="127.0.0.1",
+        vllm_server_port=8000,
+        vllm_server_timeout=600.0,   # 给 server 启动留足时间
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
     )

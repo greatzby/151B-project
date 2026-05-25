@@ -102,7 +102,66 @@ echo "================================================"
 if [ -d "ckpts/rl_merged" ] && [ -n "$(ls -A ckpts/rl_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/rl_merged 已存在"
 else
-    CUDA_VISIBLE_DEVICES=0,1 python rl_train.py
+    # 1) 先确保没有残留
+    cleanup_vllm
+
+    # 2) 在 GPU 1 上后台启动 vLLM server
+    echo "🚀 启动 vLLM server on GPU 1 ..."
+    CUDA_VISIBLE_DEVICES=1 \
+    VLLM_DISABLE_CUSTOM_ALL_REDUCE=1 \
+    trl vllm-serve \
+        --model ckpts/sft_merged \
+        --host 127.0.0.1 \
+        --port 8000 \
+        --gpu_memory_utilization 0.85 \
+        --dtype bfloat16 \
+        > logs/vllm_server.log 2>&1 &
+    VLLM_PID=$!
+    echo "   vLLM server PID = $VLLM_PID"
+    echo "   日志: tail -f logs/vllm_server.log"
+
+    # 3) 等 vLLM 就绪（最多 8 分钟）
+    echo "⏳ 等待 vLLM server 就绪 ..."
+    READY=0
+    for i in $(seq 1 96); do
+        if curl -sf http://127.0.0.1:8000/health > /dev/null 2>&1; then
+            echo "✅ vLLM server 就绪 (用时约 $((i*5))s)"
+            READY=1
+            break
+        fi
+        if ! kill -0 $VLLM_PID 2>/dev/null; then
+            echo "❌ vLLM server 进程已退出，最后 50 行日志："
+            tail -50 logs/vllm_server.log
+            exit 1
+        fi
+        sleep 5
+    done
+    if [ $READY -ne 1 ]; then
+        echo "❌ vLLM server 8 分钟未就绪，看日志："
+        tail -50 logs/vllm_server.log
+        kill -9 $VLLM_PID 2>/dev/null || true
+        exit 1
+    fi
+
+    # 4) 训练只用 GPU 0
+    set +e
+    CUDA_VISIBLE_DEVICES=0 python rl_train.py
+    TRAIN_EXIT=$?
+    set -e
+
+    # 5) 收尾：关 vLLM server
+    echo "🛑 关闭 vLLM server (PID=$VLLM_PID) ..."
+    kill $VLLM_PID 2>/dev/null || true
+    sleep 5
+    kill -9 $VLLM_PID 2>/dev/null || true
+    pkill -9 -f "trl vllm-serve" 2>/dev/null || true
+    pkill -9 -f "vllm.entrypoints" 2>/dev/null || true
+    cleanup_vllm
+
+    if [ $TRAIN_EXIT -ne 0 ]; then
+        echo "❌ rl_train.py 退出码 $TRAIN_EXIT"
+        exit $TRAIN_EXIT
+    fi
 fi
 # ============ [6/9] 评测 RL ============
 echo ""
