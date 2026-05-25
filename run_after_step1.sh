@@ -31,8 +31,8 @@ cleanup_vllm() {
     echo "🧹 清理残留 vLLM / GPU 进程..."
     pkill -9 -f "VllmWorker"   2>/dev/null || true
     pkill -9 -f "EngineCore"   2>/dev/null || true
-    pkill -9 -f "multiproc"    2>/dev/null || true
-    pkill -9 -f "rl_train.py"  2>/dev/null || true
+    #pkill -9 -f "multiproc"    2>/dev/null || true
+    #pkill -9 -f "rl_train.py"  2>/dev/null || true
     sleep 8
     echo "📊 当前 GPU 状态："
     nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total --format=csv
