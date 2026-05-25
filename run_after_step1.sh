@@ -1,14 +1,18 @@
 #!/bin/bash
 # 从 SFT 训练开始，到生成 3 份 Kaggle 提交结束
 # 假设 prepare_sft_data.py（步骤1）已经跑完
+# 单卡模式：所有训练/推理都在 GPU 0 上
 
 set -e
 source .venv/bin/activate
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0
 export LD_LIBRARY_PATH=$(python -c "import os, nvidia.cudnn; print(os.path.dirname(nvidia.cudnn.__file__))")/lib:$LD_LIBRARY_PATH
 
-# 让 PyTorch 显存分配更宽松，缓解 vLLM OOM
+# 让 PyTorch 显存分配更宽松
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# 如遇 vLLM V1 engine 兼容问题（NotImplementedError）可启用下行：
+# export VLLM_USE_V1=0
 
 mkdir -p splits sft_data ckpts results logs
 
@@ -21,8 +25,7 @@ cleanup_vllm() {
     pkill -9 -f "VllmWorker"   2>/dev/null || true
     pkill -9 -f "EngineCore"   2>/dev/null || true
     pkill -9 -f "multiproc"    2>/dev/null || true
-    # 注意：不要 pkill 自己的 evaluate.py（已经退出了），但保险起见也清一下孤儿
-    sleep 12
+    sleep 8
     echo "📊 当前 GPU 状态："
     nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total --format=csv
     echo ""
@@ -60,7 +63,7 @@ for f in splits/train.jsonl splits/val.jsonl sft_data/sft_train.jsonl; do
     fi
 done
 N_SFT=$(wc -l < sft_data/sft_train.jsonl)
-echo "✅ 步骤1产物齐全（$N_SFT 条 SFT 数据），开始训练"
+echo "✅ 步骤1产物齐全（$N_SFT 条 SFT 数据），开始训练（单卡模式）"
 echo ""
 
 # 启动前先清一遍，防止上一轮失败留下的残尸占显存
@@ -82,7 +85,7 @@ echo "================================================"
 if [ -d "ckpts/sft_merged" ] && [ -n "$(ls -A ckpts/sft_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/sft_merged 已存在"
 else
-    CUDA_VISIBLE_DEVICES=0 python sft_train.py
+    python sft_train.py
 fi
 
 # ============ [4/9] 评测 SFT ============
@@ -94,75 +97,34 @@ run_eval "ckpts/sft_merged" \
          "splits/val.jsonl" \
          "results/eval_sft_val.jsonl"
 
-# ============ [5/9] RL 训练 ============
+# ============ [5/9] RL 训练（单卡 colocate）============
 echo ""
 echo "================================================"
-echo "[5/9] RL (GRPO) 训练 (~8-10h)"
+echo "[5/9] RL (GRPO) 训练 - 单卡 colocate 模式"
 echo "================================================"
 if [ -d "ckpts/rl_merged" ] && [ -n "$(ls -A ckpts/rl_merged 2>/dev/null)" ]; then
     echo "⏭️  跳过：ckpts/rl_merged 已存在"
 else
-    # 1) 先确保没有残留
     cleanup_vllm
 
-    # 2) 在 GPU 1 上后台启动 vLLM server
-    echo "🚀 启动 vLLM server on GPU 1 ..."
-    CUDA_VISIBLE_DEVICES=1 \
-    VLLM_DISABLE_CUSTOM_ALL_REDUCE=1 \
-    trl vllm-serve \
-        --model ckpts/sft_merged \
-        --host 127.0.0.1 \
-        --port 8000 \
-        --gpu_memory_utilization 0.85 \
-        --dtype bfloat16 \
-        > logs/vllm_server.log 2>&1 &
-    VLLM_PID=$!
-    echo "   vLLM server PID = $VLLM_PID"
-    echo "   日志: tail -f logs/vllm_server.log"
-
-    # 3) 等 vLLM 就绪（最多 8 分钟）
-    echo "⏳ 等待 vLLM server 就绪 ..."
-    READY=0
-    for i in $(seq 1 96); do
-        if curl -sf http://127.0.0.1:8000/health > /dev/null 2>&1; then
-            echo "✅ vLLM server 就绪 (用时约 $((i*5))s)"
-            READY=1
-            break
-        fi
-        if ! kill -0 $VLLM_PID 2>/dev/null; then
-            echo "❌ vLLM server 进程已退出，最后 50 行日志："
-            tail -50 logs/vllm_server.log
-            exit 1
-        fi
-        sleep 5
-    done
-    if [ $READY -ne 1 ]; then
-        echo "❌ vLLM server 8 分钟未就绪，看日志："
-        tail -50 logs/vllm_server.log
-        kill -9 $VLLM_PID 2>/dev/null || true
-        exit 1
-    fi
-
-    # 4) 训练只用 GPU 0
+    # 训练 + vLLM 都在 GPU 0
+    # vllm_gpu_mem=0.30：vLLM 占 30% 显存，训练占大头
+    # 若 OOM，把 0.30 调小到 0.25 或 0.20；
+    # 若 vLLM 报 NotImplementedError，加 --no_vllm 退化到 HF 生成
     set +e
-    CUDA_VISIBLE_DEVICES=0 python rl_train.py
+    python rl_train.py --vllm_gpu_mem 0.30
     TRAIN_EXIT=$?
     set -e
 
-    # 5) 收尾：关 vLLM server
-    echo "🛑 关闭 vLLM server (PID=$VLLM_PID) ..."
-    kill $VLLM_PID 2>/dev/null || true
-    sleep 5
-    kill -9 $VLLM_PID 2>/dev/null || true
-    pkill -9 -f "trl vllm-serve" 2>/dev/null || true
-    pkill -9 -f "vllm.entrypoints" 2>/dev/null || true
     cleanup_vllm
 
     if [ $TRAIN_EXIT -ne 0 ]; then
         echo "❌ rl_train.py 退出码 $TRAIN_EXIT"
+        echo "💡 提示：如果是 vLLM 报错，可改用 'python rl_train.py --no_vllm'（慢但稳）"
         exit $TRAIN_EXIT
     fi
 fi
+
 # ============ [6/9] 评测 RL ============
 echo ""
 echo "================================================"

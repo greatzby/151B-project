@@ -1,9 +1,8 @@
 """
 GRPO RL 训练，用 judger 作为 reward function。
 
-资源分配（双卡）：
-- GPU 0：训练
-- GPU 1：vLLM 加速采样
+资源分配（单卡）：
+- GPU 0：训练 + vLLM 采样（colocate 模式共享显存）
 """
 import argparse
 import json
@@ -80,6 +79,8 @@ def main():
     parser.add_argument("--num_generations", type=int, default=RL_NUM_GENERATIONS)
     parser.add_argument("--no_vllm", action="store_true",
                         help="禁用 vLLM 加速（fallback 到 HF 生成，会慢很多）")
+    parser.add_argument("--vllm_gpu_mem", type=float, default=0.30,
+                        help="colocate 模式下 vLLM 占用显存比例 (0~1)")
     args = parser.parse_args()
 
     # ── 自动计算合法的 batch size ────────────────────────────────────
@@ -146,10 +147,10 @@ def main():
     )
 
     # 5. GRPO 配置
-    grpo_config = GRPOConfig(
+    grpo_kwargs = dict(
         output_dir=str(RL_CKPT_DIR),
         max_steps=args.max_steps,
-        per_device_train_batch_size=per_device_bs,           # ✅ 自动算出的合法值
+        per_device_train_batch_size=per_device_bs,
         gradient_accumulation_steps=RL_GRAD_ACCUM,
         learning_rate=args.lr,
         bf16=True,
@@ -165,14 +166,21 @@ def main():
         report_to="none",
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        use_vllm=not args.no_vllm,
-        vllm_mode="server",
-        vllm_server_host="127.0.0.1",
-        vllm_server_port=8000,
-        vllm_server_timeout=600.0,   # 给 server 启动留足时间
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
     )
+
+    # ── 单卡 colocate 模式：vLLM 和训练共享 GPU 0 ──
+    if not args.no_vllm:
+        grpo_kwargs.update(dict(
+            use_vllm=True,
+            vllm_mode="colocate",
+            vllm_gpu_memory_utilization=args.vllm_gpu_mem,
+        ))
+    else:
+        grpo_kwargs["use_vllm"] = False
+
+    grpo_config = GRPOConfig(**grpo_kwargs)
 
     # 6. Trainer
     trainer = GRPOTrainer(
