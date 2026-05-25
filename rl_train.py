@@ -3,8 +3,13 @@ GRPO RL 训练，用 judger 作为 reward function。
 
 资源分配（单卡）：
 - GPU 0：训练 + vLLM 采样（colocate 模式共享显存）
+
+本脚本对 TRL 版本做了自适应：
+- 新版 TRL（有 vllm_mode）：使用 vllm_mode="colocate"
+- 旧版 TRL（只有 vllm_device）：使用 vllm_device="cuda:0"
 """
 import argparse
+import inspect
 import json
 import os
 import re
@@ -70,6 +75,77 @@ def reward_format(completions, **kwargs):
     return rewards
 
 
+def build_grpo_config(args, per_device_bs):
+    """根据安装的 TRL 版本，构造兼容的 GRPOConfig"""
+    valid = set(inspect.signature(GRPOConfig.__init__).parameters)
+    print(f"🔎 检测到的 GRPOConfig 参数中 vLLM 相关："
+          f" use_vllm={'use_vllm' in valid},"
+          f" vllm_mode={'vllm_mode' in valid},"
+          f" vllm_device={'vllm_device' in valid},"
+          f" vllm_gpu_memory_utilization={'vllm_gpu_memory_utilization' in valid}")
+
+    kwargs = dict(
+        output_dir=str(RL_CKPT_DIR),
+        max_steps=args.max_steps,
+        per_device_train_batch_size=per_device_bs,
+        gradient_accumulation_steps=RL_GRAD_ACCUM,
+        learning_rate=args.lr,
+        bf16=True,
+        logging_steps=1,
+        save_strategy="steps",
+        save_steps=50,
+        save_total_limit=2,
+        num_generations=args.num_generations,
+        max_prompt_length=RL_MAX_PROMPT_LEN,
+        max_completion_length=RL_MAX_COMPLETION_LEN,
+        temperature=0.9,
+        beta=RL_BETA,
+        report_to="none",
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.05,
+    )
+
+    # vLLM 配置（按版本自适应）
+    if not args.no_vllm:
+        if "use_vllm" in valid:
+            kwargs["use_vllm"] = True
+
+        if "vllm_mode" in valid:
+            # 新版 TRL：colocate 模式，跟训练共享 GPU
+            kwargs["vllm_mode"] = "colocate"
+            print("✅ 使用 TRL 新版 vLLM API: vllm_mode='colocate'")
+        elif "vllm_device" in valid:
+            # 旧版 TRL：把 vLLM 跑在同一张卡（cuda:0）
+            kwargs["vllm_device"] = "cuda:0"
+            print("✅ 使用 TRL 旧版 vLLM API: vllm_device='cuda:0'")
+        else:
+            print("⚠️  TRL 版本不支持显式选择 vLLM 模式，按默认行为运行")
+
+        if "vllm_gpu_memory_utilization" in valid:
+            kwargs["vllm_gpu_memory_utilization"] = args.vllm_gpu_mem
+
+        # 旧版 TRL 可能还有这些可选项
+        if "vllm_dtype" in valid:
+            kwargs["vllm_dtype"] = "bfloat16"
+        if "vllm_max_model_len" in valid:
+            # prompt + completion 的总长度上限
+            kwargs["vllm_max_model_len"] = RL_MAX_PROMPT_LEN + RL_MAX_COMPLETION_LEN
+    else:
+        if "use_vllm" in valid:
+            kwargs["use_vllm"] = False
+        print("⚠️  --no_vllm 已开启，将使用 HuggingFace generate（慢很多）")
+
+    # 兜底：把当前 TRL 不认识的 key 全部丢掉，避免 TypeError
+    dropped = [k for k in kwargs if k not in valid]
+    if dropped:
+        print(f"⚠️  当前 TRL 不支持以下参数，将被忽略: {dropped}")
+    kwargs = {k: v for k, v in kwargs.items() if k in valid}
+
+    return GRPOConfig(**kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default=str(SFT_MERGED_DIR),
@@ -84,11 +160,8 @@ def main():
     args = parser.parse_args()
 
     # ── 自动计算合法的 batch size ────────────────────────────────────
-    # GRPO 硬约束: global_batch_size = num_processes * per_device_batch_size
-    # 必须能被 num_generations 整除（因为同一 prompt 的 N 个生成要在一个 batch 里）
     num_procs = int(os.environ.get("WORLD_SIZE", "1"))
     per_device_bs = max(RL_BATCH_SIZE, args.num_generations)
-    # 向上调整到能被 num_generations 整除（在 num_procs 已知的情况下）
     while (per_device_bs * num_procs) % args.num_generations != 0:
         per_device_bs += 1
     global_bs = per_device_bs * num_procs
@@ -146,41 +219,8 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    # 5. GRPO 配置
-    grpo_kwargs = dict(
-        output_dir=str(RL_CKPT_DIR),
-        max_steps=args.max_steps,
-        per_device_train_batch_size=per_device_bs,
-        gradient_accumulation_steps=RL_GRAD_ACCUM,
-        learning_rate=args.lr,
-        bf16=True,
-        logging_steps=1,
-        save_strategy="steps",
-        save_steps=50,
-        save_total_limit=2,
-        num_generations=args.num_generations,
-        max_prompt_length=RL_MAX_PROMPT_LEN,
-        max_completion_length=RL_MAX_COMPLETION_LEN,
-        temperature=0.9,
-        beta=RL_BETA,
-        report_to="none",
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
-    )
-
-    # ── 单卡 colocate 模式：vLLM 和训练共享 GPU 0 ──
-    if not args.no_vllm:
-        grpo_kwargs.update(dict(
-            use_vllm=True,
-            vllm_mode="colocate",
-            vllm_gpu_memory_utilization=args.vllm_gpu_mem,
-        ))
-    else:
-        grpo_kwargs["use_vllm"] = False
-
-    grpo_config = GRPOConfig(**grpo_kwargs)
+    # 5. GRPO 配置（版本自适应）
+    grpo_config = build_grpo_config(args, per_device_bs)
 
     # 6. Trainer
     trainer = GRPOTrainer(
