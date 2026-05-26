@@ -3,7 +3,7 @@
 
 1. 将 public.jsonl 切成 train/val
 2. 用 base 模型对训练集每题生成 N 个回答
-3. 用 judger 筛选正确的回答作为 SFT 数据
+3. 用 judger 筛选 **所有** 正确的回答作为 SFT 数据（每题保留全部正确样本）
 """
 import argparse
 import json
@@ -93,17 +93,27 @@ def main():
     print(f"正在为 {len(prompts)} 题各生成 {args.n_samples} 个候选回答...")
     outputs = llm.generate(prompts, sampling_params=sampling_params)
 
-    # 5. 筛选正确的回答
+    # 5. 筛选所有正确的回答
     judger  = Judger(strict_extract=False)
     sft_data = []
-    n_correct_q = 0
+    n_correct_q   = 0          # 至少有 1 个正确回答的题目数
+    n_total_correct = 0        # 总共保留下来的正确样本数
+    per_q_correct = []         # 每题正确数的分布
 
     for item, output in tqdm(zip(train_data, outputs), total=len(outputs), desc="筛选"):
         system, user = build_prompt(item["question"], item.get("options"))
+
+        correct_responses = []
         for sample in output.outputs:
             response = sample.text.strip()
             if score_response(response, item, judger):
-                n_correct_q += 1
+                correct_responses.append(response)
+
+        per_q_correct.append(len(correct_responses))
+
+        if correct_responses:
+            n_correct_q += 1
+            for response in correct_responses:
                 sft_data.append({
                     "id":        item.get("id"),
                     "system":    system,
@@ -112,9 +122,22 @@ def main():
                     "answer":    item["answer"],
                     "is_mcq":    bool(item.get("options")),
                 })
-                break   # 每题保留第一个正确的
+                n_total_correct += 1
 
-    print(f"有正确回答的题目: {n_correct_q} / {len(train_data)}")
+    # 统计分布
+    from collections import Counter
+    dist = Counter(per_q_correct)
+    print("=" * 60)
+    print(f"📊 拒绝采样统计:")
+    print(f"  题目总数              : {len(train_data)}")
+    print(f"  至少有一个正确回答的题目: {n_correct_q} ({100*n_correct_q/len(train_data):.1f}%)")
+    print(f"  保留 SFT 样本总数      : {n_total_correct}")
+    print(f"  每题正确数分布        : {dict(sorted(dist.items()))}")
+    if n_correct_q:
+        avg = n_total_correct / n_correct_q
+        print(f"  有正确回答题目的平均样本数: {avg:.2f}")
+    print("=" * 60)
+
     save_jsonl(SFT_DATA_PATH, sft_data)
     print(f"已保存 {len(sft_data)} 条 SFT 训练数据到: {SFT_DATA_PATH}")
 

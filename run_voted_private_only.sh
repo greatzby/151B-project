@@ -1,7 +1,6 @@
 #!/bin/bash
-# 等当前 run 跑完后启动：
-# 只跑 private 集（n=5 多数投票），生成 3 份 voted CSV
-# 不再跑 val，节省时间，全部火力给 private 推理
+# v2 版：private 推理 + 多数投票（n=5），生成 3 份 voted CSV
+# 所有产物输出到 results_v2/
 
 set -e
 source .venv/bin/activate
@@ -10,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-mkdir -p results logs
+mkdir -p results_v2 logs
 
 cleanup_vllm() {
     echo ""
@@ -57,21 +56,21 @@ echo "============================================================"
 echo "[1/3] base 模型 voted private 推理"
 echo "============================================================"
 run_voted "Qwen/Qwen3-4B-Thinking-2507" \
-          "results/eval_base_private_voted_long.jsonl"
+          "results_v2/eval_base_private_voted_long.jsonl"
 
 echo ""
 echo "============================================================"
-echo "[2/3] sft 模型 voted private 推理"
+echo "[2/3] sft 模型 voted private 推理（v2）"
 echo "============================================================"
-run_voted "ckpts/sft_merged" \
-          "results/eval_sft_private_voted_long.jsonl"
+run_voted "ckpts_v2/sft_merged" \
+          "results_v2/eval_sft_private_voted_long.jsonl"
 
 echo ""
 echo "============================================================"
-echo "[3/3] rl 模型 voted private 推理"
+echo "[3/3] rl 模型 voted private 推理（v2）"
 echo "============================================================"
-run_voted "ckpts/rl_merged" \
-          "results/eval_rl_private_voted_long.jsonl"
+run_voted "ckpts_v2/rl_merged" \
+          "results_v2/eval_rl_private_voted_long.jsonl"
 
 # ============ 转 CSV ============
 echo ""
@@ -79,12 +78,12 @@ echo "============================================================"
 echo "转 3 份 voted CSV"
 echo "============================================================"
 for variant in base sft rl; do
-    if [ -f "results/submission_${variant}_voted_long.csv" ]; then
-        echo "⏭️  跳过：results/submission_${variant}_voted_long.csv 已存在"
+    if [ -f "results_v2/submission_${variant}_voted_long.csv" ]; then
+        echo "⏭️  跳过：results_v2/submission_${variant}_voted_long.csv 已存在"
     else
         python convert_to_csv.py \
-            --input  "results/eval_${variant}_private_voted_long.jsonl" \
-            --output "results/submission_${variant}_voted_long.csv"
+            --input  "results_v2/eval_${variant}_private_voted_long.jsonl" \
+            --output "results_v2/submission_${variant}_voted_long.csv"
     fi
 done
 
@@ -92,12 +91,12 @@ done
 echo ""
 echo "🎉 全部完成！"
 echo ""
-echo "============ 当前所有候选 CSV（共 6 份可提交）============"
-ls -lh results/submission_*.csv
+echo "============ v2 候选 CSV ============"
+ls -lh results_v2/submission_*.csv 2>/dev/null || echo "（暂无）"
 echo ""
-echo "→ baseline (n=1):"
-echo "    submission_base.csv  /  submission_sft.csv  /  submission_rl.csv"
-echo "→ voted (n=5, 强采样):"
-echo "    submission_base_voted.csv  /  submission_sft_voted.csv  /  submission_rl_voted.csv"
+echo "→ v2 voted (n=5)：可提交 Kaggle"
+echo "    submission_base_voted_long.csv"
+echo "    submission_sft_voted_long.csv"
+echo "    submission_rl_voted_long.csv"
 echo ""
-echo "全部提交到 Kaggle 看哪个分最高即可。"
+echo "提示：旧版本提交在 results/ 下，新旧可以一起对比择优提交。"
