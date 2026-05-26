@@ -52,21 +52,26 @@ run_voted() {
 cleanup_vllm
 
 # ============ 三个模型分别跑 voted private ============
-
+echo ""
+echo "============================================================"
+echo "[1/3] base 模型 voted private 推理"
+echo "============================================================"
+run_voted "Qwen/Qwen3-4B-Thinking-2507" \
+          "results/eval_base_private_voted_long.jsonl"
 
 echo ""
 echo "============================================================"
 echo "[2/3] sft 模型 voted private 推理"
 echo "============================================================"
 run_voted "ckpts/sft_merged" \
-          "results/eval_sft_private_voted.jsonl"
+          "results/eval_sft_private_voted_long.jsonl"
 
 echo ""
 echo "============================================================"
 echo "[3/3] rl 模型 voted private 推理"
 echo "============================================================"
 run_voted "ckpts/rl_merged" \
-          "results/eval_rl_private_voted.jsonl"
+          "results/eval_rl_private_voted_long.jsonl"
 
 # ============ 转 CSV ============
 echo ""
@@ -74,12 +79,12 @@ echo "============================================================"
 echo "转 3 份 voted CSV"
 echo "============================================================"
 for variant in base sft rl; do
-    if [ -f "results/submission_${variant}_voted.csv" ]; then
-        echo "⏭️  跳过：results/submission_${variant}_voted.csv 已存在"
+    if [ -f "results/submission_${variant}_voted_long.csv" ]; then
+        echo "⏭️  跳过：results/submission_${variant}_voted_long.csv 已存在"
     else
         python convert_to_csv.py \
-            --input  "results/eval_${variant}_private_voted.jsonl" \
-            --output "results/submission_${variant}_voted.csv"
+            --input  "results/eval_${variant}_private_voted_long.jsonl" \
+            --output "results/submission_${variant}_voted_long.csv"
     fi
 done
 

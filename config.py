@@ -24,7 +24,7 @@ RL_MERGED_DIR   = CKPT_DIR / "rl_merged"
 # ── 模型 ──────────────────────────────────────────────────────────
 MODEL_ID      = "Qwen/Qwen3-4B-Thinking-2507"
 MAX_TOKENS    = 32768       # 恢复！会被 max_model_len 自然约束
-MAX_MODEL_LEN = 16384
+MAX_MODEL_LEN = 32768
 
 # ── 数据划分 ──────────────────────────────────────────────────────
 VAL_RATIO = 0.10
