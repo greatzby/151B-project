@@ -68,6 +68,8 @@ def main():
         max_model_len=MAX_MODEL_LEN,
         trust_remote_code=True,
         dtype="bfloat16",
+        distributed_executor_backend="mp",   # ← 新增
+        disable_custom_all_reduce=True,      # ← 新增（关键）
     )
 
     sampling_params = SamplingParams(
