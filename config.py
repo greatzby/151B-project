@@ -45,11 +45,11 @@ LORA_R           = 16
 LORA_ALPHA       = 32
 
 # ── RL (GRPO) ─────────────────────────────────────────────────────
-RL_MAX_STEPS         = 150      # 12h 预算下减半
+RL_MAX_STEPS         = 70      # 12h 预算下减半
 RL_BATCH_SIZE        = 2
 RL_GRAD_ACCUM        = 2
 RL_LR                = 5e-6
-RL_NUM_GENERATIONS   = 2        # 显存换长度（注意：=2 时 advantage 方差大但能跑）
+RL_NUM_GENERATIONS   = 4        # 显存换长度（注意：=2 时 advantage 方差大但能跑）
 RL_MAX_PROMPT_LEN    = 2048     # 防题目截断
 RL_MAX_COMPLETION_LEN = 8192    # thinking 模型必须给足空间
 RL_BETA              = 0.04
