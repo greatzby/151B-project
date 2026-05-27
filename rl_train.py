@@ -1,18 +1,8 @@
 """
-GRPO RL 训练，用 judger 作为 reward function。
-
-资源分配：
-- 单卡模式：GPU 0 同时训练 + 采样（HF generate）
-- 双卡 DDP 模式：GPU 0 + GPU 1 各跑一份模型副本，分别独立 generate
-  启动命令：
-      CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
-          --multi_gpu --num_processes 2 --mixed_precision bf16 \
-          rl_train.py --no_vllm
-
-本脚本对 TRL 版本做了自适应：
-- 新版 TRL（有 vllm_mode）：使用 vllm_mode="colocate"
-- 旧版 TRL（只有 vllm_device）：使用 vllm_device=args.vllm_device
-- --no_vllm：完全禁用 vLLM，使用 HF generate
+GRPO RL 训练。本版本支持：
+  --train_data  指定训练数据路径（默认 TRAIN_DATA_PATH）
+  --temperature 采样温度（默认 0.9）
+  --beta        KL 系数（默认 RL_BETA）
 """
 import argparse
 import inspect
@@ -34,19 +24,17 @@ from data_utils import load_jsonl, build_prompt
 from judger import Judger
 
 
-# 全局 judger（用于 reward）
 _judger = Judger(strict_extract=False)
 
 
 def reward_correctness(completions, **kwargs):
-    """主 reward：答对 +1，答错 0"""
-    answers  = kwargs.get("answer", [])
-    is_mcqs  = kwargs.get("is_mcq", [])
+    answers = kwargs.get("answer", [])
+    is_mcqs = kwargs.get("is_mcq", [])
 
     rewards = []
     for i, completion in enumerate(completions):
-        gold   = answers[i]   if i < len(answers)  else None
-        is_mcq = is_mcqs[i]   if i < len(is_mcqs)  else False
+        gold = answers[i] if i < len(answers) else None
+        is_mcq = is_mcqs[i] if i < len(is_mcqs) else False
 
         if gold is None or (isinstance(gold, list) and len(gold) == 0):
             rewards.append(0.0)
@@ -71,7 +59,6 @@ def reward_correctness(completions, **kwargs):
 
 
 def reward_format(completions, **kwargs):
-    """副 reward：有正确格式的 \\boxed{} 给 0.1 分（鼓励格式规范）"""
     rewards = []
     for c in completions:
         if re.search(r"\\boxed\{[^}]+\}", c):
@@ -82,13 +69,11 @@ def reward_format(completions, **kwargs):
 
 
 def build_grpo_config(args, per_device_bs):
-    """根据安装的 TRL 版本，构造兼容的 GRPOConfig"""
     valid = set(inspect.signature(GRPOConfig.__init__).parameters)
-    print(f"🔎 检测到的 GRPOConfig 参数中 vLLM 相关："
+    print(f"🔎 GRPOConfig 检测："
           f" use_vllm={'use_vllm' in valid},"
           f" vllm_mode={'vllm_mode' in valid},"
-          f" vllm_device={'vllm_device' in valid},"
-          f" vllm_gpu_memory_utilization={'vllm_gpu_memory_utilization' in valid}")
+          f" vllm_device={'vllm_device' in valid}")
 
     kwargs = dict(
         output_dir=str(RL_CKPT_DIR),
@@ -104,36 +89,28 @@ def build_grpo_config(args, per_device_bs):
         num_generations=args.num_generations,
         max_prompt_length=RL_MAX_PROMPT_LEN,
         max_completion_length=RL_MAX_COMPLETION_LEN,
-        temperature=0.9,
-        beta=RL_BETA,
+        temperature=args.temperature,                # ← 改：从 args 读
+        beta=args.beta,                              # ← 改：从 args 读
         report_to="none",
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
-        # ── DDP 设置：LoRA 只训练 adapter 层，关掉 unused param 检查避免报错/拖慢 ──
         ddp_find_unused_parameters=False,
-        # 让数据加载在 DDP 下也均匀
         dataloader_drop_last=True,
     )
 
-    # vLLM 配置（按版本自适应）
     if not args.no_vllm:
         if "use_vllm" in valid:
             kwargs["use_vllm"] = True
-
         if "vllm_mode" in valid:
             kwargs["vllm_mode"] = "colocate"
             print("✅ 使用 TRL 新版 vLLM API: vllm_mode='colocate'")
         elif "vllm_device" in valid:
             kwargs["vllm_device"] = args.vllm_device
             print(f"✅ 使用 TRL 旧版 vLLM API: vllm_device='{args.vllm_device}'")
-        else:
-            print("⚠️  TRL 版本不支持显式选择 vLLM 模式，按默认行为运行")
-
         if "vllm_gpu_memory_utilization" in valid:
             kwargs["vllm_gpu_memory_utilization"] = args.vllm_gpu_mem
-
         if "vllm_dtype" in valid:
             kwargs["vllm_dtype"] = "bfloat16"
         if "vllm_max_model_len" in valid:
@@ -141,9 +118,8 @@ def build_grpo_config(args, per_device_bs):
     else:
         if "use_vllm" in valid:
             kwargs["use_vllm"] = False
-        print("⚠️  --no_vllm 已开启，将使用 HuggingFace generate（慢但稳定）")
+        print("⚠️  --no_vllm 已开启，将使用 HuggingFace generate")
 
-    # 兜底：把当前 TRL 不认识的 key 全部丢掉，避免 TypeError
     dropped = [k for k in kwargs if k not in valid]
     if dropped:
         print(f"⚠️  当前 TRL 不支持以下参数，将被忽略: {dropped}")
@@ -154,20 +130,19 @@ def build_grpo_config(args, per_device_bs):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=str(SFT_MERGED_DIR),
-                        help="SFT merged 模型路径")
+    parser.add_argument("--model", type=str, default=str(SFT_MERGED_DIR))
+    parser.add_argument("--train_data", type=str, default=str(TRAIN_DATA_PATH),  # ← 新增
+                        help="训练数据路径，默认用 config 里的 TRAIN_DATA_PATH")
     parser.add_argument("--max_steps", type=int, default=RL_MAX_STEPS)
     parser.add_argument("--lr", type=float, default=RL_LR)
     parser.add_argument("--num_generations", type=int, default=RL_NUM_GENERATIONS)
-    parser.add_argument("--no_vllm", action="store_true",
-                        help="禁用 vLLM 加速（fallback 到 HF 生成）")
-    parser.add_argument("--vllm_gpu_mem", type=float, default=0.30,
-                        help="（如果用 vLLM）vLLM 占用显存比例 0~1")
-    parser.add_argument("--vllm_device", type=str, default="cuda:0",
-                        help="（如果用旧版 TRL+vLLM）vLLM 跑哪张卡")
+    parser.add_argument("--temperature", type=float, default=0.9)        # ← 新增
+    parser.add_argument("--beta", type=float, default=RL_BETA)           # ← 新增
+    parser.add_argument("--no_vllm", action="store_true")
+    parser.add_argument("--vllm_gpu_mem", type=float, default=0.30)
+    parser.add_argument("--vllm_device", type=str, default="cuda:0")
     args = parser.parse_args()
 
-    # ── 自动计算合法的 batch size ────────────────────────────────────
     num_procs = int(os.environ.get("WORLD_SIZE", "1"))
     per_device_bs = max(RL_BATCH_SIZE, args.num_generations)
     while (per_device_bs * num_procs) % args.num_generations != 0:
@@ -179,10 +154,11 @@ def main():
     print(f"📐 global_batch_size    = {global_bs}")
     print(f"📐 num_generations      = {args.num_generations}")
     print(f"📐 unique_prompts/step  = {unique_prompts_per_step}")
+    print(f"📐 lr={args.lr}, temperature={args.temperature}, beta={args.beta}")
 
-    # 1. 加载训练数据
-    train_data = load_jsonl(TRAIN_DATA_PATH)
-    print(f"已加载 {len(train_data)} 条训练数据")
+    # 1. 加载训练数据 ← 改：从 args 读
+    train_data = load_jsonl(args.train_data)
+    print(f"已加载 {len(train_data)} 条训练数据 from {args.train_data}")
 
     # 2. tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
@@ -195,12 +171,10 @@ def main():
         system, user = build_prompt(item["question"], item.get("options"))
         prompt = tokenizer.apply_chat_template(
             [{"role": "system", "content": system},
-             {"role": "user",   "content": user}],
+             {"role": "user", "content": user}],
             tokenize=False,
             add_generation_prompt=True,
         )
-
-        # 🔧 统一 answer 为 list[str]，避免 PyArrow 类型混乱
         ans = item["answer"]
         if ans is None:
             ans = []
@@ -208,7 +182,6 @@ def main():
             ans = [str(ans)]
         else:
             ans = [str(x) for x in ans]
-
         examples.append({
             "prompt": prompt,
             "answer": ans,
@@ -227,10 +200,8 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    # 5. GRPO 配置（版本自适应）
     grpo_config = build_grpo_config(args, per_device_bs)
 
-    # 6. Trainer
     trainer = GRPOTrainer(
         model=args.model,
         args=grpo_config,
@@ -240,19 +211,15 @@ def main():
         processing_class=tokenizer,
     )
 
-    # 7. 训练
     trainer.train()
 
-    # 8. 保存 LoRA adapter（Trainer 内部已处理 main-process-only）
     trainer.save_model(str(RL_CKPT_DIR))
     if trainer.accelerator.is_main_process:
         tokenizer.save_pretrained(str(RL_CKPT_DIR))
         print(f"✅ RL LoRA adapter 保存到: {RL_CKPT_DIR}")
 
-    # 9. 等所有进程同步，再 merge
     trainer.accelerator.wait_for_everyone()
 
-    # 10. Merge LoRA → 完整模型（只在主进程）
     if trainer.accelerator.is_main_process:
         print("正在 merge RL LoRA 进 SFT merged 模型...")
         unwrapped = trainer.accelerator.unwrap_model(trainer.model)
