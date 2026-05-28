@@ -28,11 +28,14 @@ def split_data(data, val_ratio=0.1, seed=42):
     return train, val
 
 
-# ── Prompt 模板（保留你原版的） ─────────────────────────────────────
 SYSTEM_PROMPT_MATH = (
-    "You are an expert mathematician. Solve the problem carefully but concisely. "
-    "The problem may contain one or multiple blanks marked [ANS]. "
-    "Return the final answer values in the same order as the blanks. "
+    "You are an expert mathematician. Solve the problem, then give the final answer.\n"
+    "Your only goal is to compute the requested answer value(s). Some problems are phrased "
+    "as instructions to draw, plot, sketch, graph, construct, write a proof/essay, or show "
+    "work 'on paper'. Ignore any such presentation requirement — reason it out analytically "
+    "and report only the final value(s) the problem is ultimately asking for.\n"
+    "The problem may contain one or more blanks marked [ANS]. "
+    "Return the answer values in the same order as the blanks. "
     "If there are multiple answers, separate them by commas inside one single \\boxed{}. "
     "Do not include labels like a) or b) inside the box. "
     "End your response with exactly one final answer in the form \\boxed{...}."
@@ -41,6 +44,8 @@ SYSTEM_PROMPT_MATH = (
 SYSTEM_PROMPT_MCQ = (
     "You are an expert mathematician. "
     "Read the problem and the answer choices below, then select the single best answer. "
+    "If the problem asks you to draw, plot, sketch, or graph, solve it analytically instead "
+    "and still pick the matching option. "
     "Output only the letter of your chosen option inside \\boxed{}, e.g. \\boxed{C}."
 )
 
